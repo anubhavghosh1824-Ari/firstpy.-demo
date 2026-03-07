@@ -1,0 +1,1458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!--
+    Disable user-scaling so the track stays full-screen on mobile and the
+    browser cannot intercept pinch-zoom while the player is steering.
+  -->
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0,
+                 maximum-scale=1.0, user-scalable=no" />
+  <title>2D Racer — Tilt &amp; Touch</title>
+
+  <style>
+    /* ============================================================
+       RESET & BASE
+       ============================================================ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: #111;
+      /* Courier New gives a nice retro HUD look without an external font */
+      font-family: 'Courier New', Courier, monospace;
+      /*
+        touch-action: none on the body prevents the browser from claiming
+        scroll / pan gestures before our own touch listeners run.
+      */
+      touch-action: none;
+    }
+
+    /* ============================================================
+       CANVAS — fills the entire viewport
+       ============================================================ */
+    #gameCanvas {
+      position: absolute;
+      top: 0; left: 0;
+      display: block;
+    }
+
+    /* ============================================================
+       HUD — top-left, non-interactive
+       ============================================================ */
+    #hud {
+      position: absolute;
+      top: 12px; left: 12px;
+      color: #fff;
+      text-shadow: 1px 1px 3px #000, 0 0 8px rgba(0,0,0,.8);
+      pointer-events: none;
+      z-index: 5;
+      line-height: 1.7;
+    }
+    #hud-speed { color: #ffdd00; font-size: 22px; font-weight: bold; }
+    #hud-mode  { color: #88ddff; font-size: 14px; font-weight: bold; }
+    #hud-laps  { color: #aaffaa; font-size: 14px; font-weight: bold; }
+
+    /* ============================================================
+       MODE TOGGLE BUTTON — top-right
+       Highly visible yellow pill, functions as the iOS permission trigger
+       for DeviceOrientationEvent (requires a transient user gesture).
+       ============================================================ */
+    #toggle-btn {
+      position: absolute;
+      top: 12px; right: 12px;
+      padding: 10px 18px;
+      background: rgba(255, 220, 0, .9);
+      color: #111;
+      border: none; border-radius: 10px;
+      font-size: 14px; font-weight: bold;
+      cursor: pointer; z-index: 10;
+      letter-spacing: .04em;
+      box-shadow: 0 2px 8px rgba(0,0,0,.5);
+      transition: transform .1s;
+      /* Prevent text-selection flicker on rapid taps */
+      user-select: none; -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #toggle-btn:active { transform: scale(.95); }
+
+    /* ============================================================
+       TOUCH CONTROLS
+       - Positioned in the bottom 30 % of the screen
+         (landscape thumb-reach zone per mobile UX guidelines).
+       - Minimum button size: 64 × 64 CSS px (exceeds 48 × 48 spec).
+       - Spacing ≥ 8 px between buttons.
+       - Visual feedback via :active ONLY — no :hover (mobile-first).
+       ============================================================ */
+    #touch-controls {
+      position: absolute;
+      bottom: 0; left: 0;
+      width: 100%;
+      height: 30%;
+      min-height: 110px;
+      display: flex;           /* shown/hidden by JS */
+      flex-direction: row;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 20px;
+      pointer-events: none;    /* Container transparent; children handle events */
+      z-index: 8;
+    }
+
+    /* Steer buttons live in a cluster on the left */
+    .steer-cluster {
+      display: flex;
+      flex-direction: row;
+      gap: 8px;                /* ≥ 8 px spacing between buttons */
+    }
+
+    .touch-btn {
+      /* Minimum 64 × 64 px — well above 48 × 48 px accessibility floor */
+      min-width: 72px;
+      min-height: 64px;
+      background: rgba(255,255,255,.15);
+      border: 2px solid rgba(255,255,255,.45);
+      border-radius: 14px;
+      color: #fff;
+      font-size: 26px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      pointer-events: auto;    /* Re-enable on individual buttons */
+      user-select: none; -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      transition: background .08s, border-color .08s;
+    }
+
+    /*
+      Visual feedback on :active — intentionally NOT :hover.
+      Hover is unreliable / absent on touch devices.
+    */
+    .touch-btn:active {
+      background: rgba(255,255,255,.45);
+      border-color: rgba(255,255,255,.9);
+    }
+
+    #accel-btn {
+      min-width: 96px;
+      min-height: 80px;
+      background: rgba(0,200,50,.2);
+      border-color: rgba(0,220,80,.65);
+      font-size: 15px;
+      font-weight: bold;
+      line-height: 1.4;
+      text-align: center;
+    }
+    #accel-btn:active {
+      background: rgba(0,200,50,.55);
+      border-color: rgba(0,255,100,.9);
+    }
+
+    /* ============================================================
+       START / RESET OVERLAY
+       ============================================================ */
+    #start-screen {
+      position: absolute; inset: 0;
+      background: rgba(0,0,0,.88);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 18px;
+      z-index: 20;
+      pointer-events: auto;
+    }
+
+    #start-screen h1 {
+      font-size: clamp(26px, 6vw, 52px);
+      color: #ffdd00;
+      text-align: center;
+      letter-spacing: .1em;
+    }
+
+    #start-screen p {
+      font-size: clamp(13px, 2.5vw, 17px);
+      color: #ccc;
+      text-align: center;
+      max-width: 420px;
+      padding: 0 20px;
+      line-height: 1.6;
+    }
+
+    #start-btn {
+      padding: 15px 44px;
+      background: #ffdd00; color: #111;
+      border: none; border-radius: 12px;
+      font-size: clamp(16px, 3vw, 22px); font-weight: bold;
+      cursor: pointer; letter-spacing: .08em;
+      box-shadow: 0 4px 16px rgba(255,220,0,.5);
+      user-select: none; -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #start-btn:active { transform: scale(.97); }
+
+    /* ============================================================
+       TOAST NOTIFICATION (brief status messages)
+       ============================================================ */
+    #toast {
+      position: absolute;
+      top: 60px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,.78);
+      color: #fff;
+      padding: 8px 22px;
+      border-radius: 22px;
+      font-size: 14px;
+      pointer-events: none;
+      z-index: 15;
+      opacity: 0;
+      transition: opacity .35s;
+      white-space: nowrap;
+    }
+    #toast.visible { opacity: 1; }
+  </style>
+</head>
+<body>
+
+<!-- ============================================================
+     DOM STRUCTURE
+     ============================================================ -->
+
+<!-- Game canvas — all track/vehicle rendering happens here -->
+<canvas id="gameCanvas"></canvas>
+
+<!-- HUD: speed, mode, laps — drawn in DOM for crisp text on all DPRs -->
+<div id="hud">
+  <div id="hud-speed">0 km/h</div>
+  <div id="hud-mode">● TOUCH</div>
+  <div id="hud-laps">LAP: 0</div>
+</div>
+
+<!-- Mode-toggle: switches between Touch and Tilt input states.
+     IMPORTANT: on iOS 13+ this click IS the transient user gesture
+     required by DeviceOrientationEvent.requestPermission(). -->
+<button id="toggle-btn" aria-label="Toggle input mode">📱 TILT MODE</button>
+
+<!-- Touch controls: rendered in the bottom-30 % thumb zone. -->
+<div id="touch-controls" role="group" aria-label="On-screen racing controls">
+  <div class="steer-cluster">
+    <button class="touch-btn" id="left-btn"  aria-label="Steer left">◀</button>
+    <button class="touch-btn" id="right-btn" aria-label="Steer right">▶</button>
+  </div>
+  <button class="touch-btn" id="accel-btn" aria-label="Accelerate">⬆<br>GAS</button>
+</div>
+
+<!-- Start / reset screen -->
+<div id="start-screen">
+  <h1>🏎️ 2D RACER</h1>
+  <p>
+    <strong>Keyboard:</strong> Arrow Keys / WASD<br>
+    <strong>Mobile:</strong> On-screen buttons or tap
+    <em>"📱 TILT MODE"</em> to steer by tilting
+  </p>
+  <button id="start-btn">▶ START RACE</button>
+</div>
+
+<!-- Brief notification messages (permission denied, etc.) -->
+<div id="toast" role="status" aria-live="polite"></div>
+
+
+<script>
+// ================================================================
+//  2D TOP-DOWN RACING GAME
+//
+//  Architecture overview
+//  ─────────────────────
+//  §1  Constants & palette
+//  §2  Canvas & resize
+//  §3  Track geometry & helpers
+//  §4  Input system — State Design Pattern
+//        BaseInputState (interface)
+//        KeyboardState  — Arrow / WASD (always active, desktop fallback)
+//        TouchState     — on-screen buttons via Touch Events API
+//        TiltState      — DeviceOrientationEvent + IIR filter
+//        InputHandler   — owns one active mobile state; merges keyboard
+//  §5  Vehicle physics
+//        Newtonian kinematics, transmission curve, drag, lateral
+//        velocity cancellation with drift clamp, render interpolation
+//  §6  Rendering helpers (track, HUD, obstacles, skid marks)
+//  §7  Game loop — fixed time-step with accumulator + interpolation
+//  §8  Initialisation & event wiring
+// ================================================================
+'use strict';
+
+/* ----------------------------------------------------------------
+   §1  CONSTANTS & CONFIGURATION
+   All tuneable parameters live here.
+---------------------------------------------------------------- */
+
+/** Fixed physics timestep: 1/60 s ≈ 16.67 ms */
+const FIXED_DT = 1 / 60;
+
+/**
+ * Anti-spiral-of-death cap: if a frame takes longer than this
+ * (e.g. the tab was hidden), we ignore the extra time instead of
+ * running dozens of catch-up physics ticks.
+ */
+const MAX_FRAME_TIME = 0.1;   // 100 ms — cap on the per-frame delta, not a rate limit
+
+/**
+ * IIR Low-Pass Filter smoothing factor for tilt input.
+ *   Y_n = α · X_n  +  (1 − α) · Y_(n-1)
+ * α ≈ 0.1 → heavy smoothing (good for noisy mobile gyroscopes).
+ * Increase α for a snappier but noisier response.
+ */
+const TILT_ALPHA = 0.1;
+
+/**
+ * Physical tilt range that maps to ±1.0 steering output.
+ * Tilting ≥ 40° left/right = maximum steering.
+ */
+const TILT_CLAMP_DEG = 40;
+
+/** Vehicle physics parameters (all distances in CSS pixels). */
+const VPHYS = {
+  W:                   20,   // half-width  of car rect
+  H:                   34,   // half-height (longest axis = forward direction)
+  ENGINE_POWER:      7000,   // Force magnitude (px/s² · mass)
+  MASS:               900,   // Arbitrary units; divides ENGINE_POWER
+  MAX_SPEED:          300,   // px / s
+  DRAG:             0.988,   // Velocity multiplier applied each physics tick
+  STEER_SPEED:        2.3,   // rad / s at full steer input
+  /**
+   * LATERAL VELOCITY CANCELLATION THRESHOLD  (drift mechanic)
+   *
+   * Each physics tick we compute the car's sideways velocity and
+   * generate an opposing impulse to cancel it (simulating tyre grip).
+   *
+   * If |lateral velocity| ≤ MAX_LATERAL_IMPULSE → cancel fully (grip).
+   * If |lateral velocity| >  MAX_LATERAL_IMPULSE → cancel only up to
+   * this value, leaving residual sideways motion (arcade drift).
+   */
+  MAX_LATERAL_IMPULSE: 14,
+  OFFTRACK_DRAG:    0.960,   // Extra drag when wheels are on grass
+};
+
+/** Colour palette (defined once, used throughout rendering). */
+const C = {
+  GRASS:        '#2c5e1a',
+  GRASS_STRIPE: '#347122',
+  ROAD:         '#585858',
+  ROAD_DARK:    '#484848',
+  KERB_RED:     '#cc2222',
+  KERB_WHITE:   '#efefef',
+  LINE:         '#e0e0e0',
+  CENTRE_DASH:  '#e8c800',
+  SKID:         'rgba(20,20,20,.28)',
+  CAR_BODY:     '#e03020',
+  CAR_FRONT:    '#ffdd00',
+  CAR_WINDOW:   '#99ccee',
+  CONE_ORANGE:  '#ff8800',
+  CONE_WHITE:   '#ffffff',
+  SHADOW:       'rgba(0,0,0,.35)',
+};
+
+
+/* ----------------------------------------------------------------
+   §2  CANVAS & RESIZE
+   We use devicePixelRatio so the canvas is crisp on retina / HiDPI
+   screens while all drawing logic uses logical (CSS) coordinates.
+---------------------------------------------------------------- */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+
+let W = 0;   // Logical canvas width  (CSS pixels)
+let H = 0;   // Logical canvas height (CSS pixels)
+
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  const dpr = window.devicePixelRatio || 1;
+
+  canvas.width        = Math.round(W * dpr);
+  canvas.height       = Math.round(H * dpr);
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+
+  /*
+   * setTransform resets the canvas transform absolutely (not cumulatively),
+   * so calling resize() multiple times is safe.
+   * After this call, all 2-D draw calls use logical pixels (W × H).
+   */
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  recomputeTrack();
+}
+
+
+/* ----------------------------------------------------------------
+   §3  TRACK GEOMETRY
+   The road surface is the annular region between two concentric
+   ellipses (outer and inner).  All track measurements are derived
+   from the logical canvas size so the game looks good on any device.
+---------------------------------------------------------------- */
+
+// Track descriptor — re-populated by recomputeTrack() on every resize.
+let TR = {};
+
+// Static cone obstacles — re-placed on resize.
+// Pre-allocated as plain objects to avoid GC in hot loops.
+const CONES = [];
+
+function recomputeTrack() {
+  TR = {
+    cx:      W * 0.50,    // Horizontal centre of oval
+    cy:      H * 0.50,    // Vertical centre of oval
+    outerRx: W * 0.425,   // Outer ellipse semi-axis X
+    outerRy: H * 0.390,   // Outer ellipse semi-axis Y
+    innerRx: W * 0.255,   // Inner ellipse semi-axis X
+    innerRy: H * 0.185,   // Inner ellipse semi-axis Y
+  };
+
+  /*
+   * Start / finish line: horizontal band at y ≈ TR.cy on the right side
+   * of the oval.  The car must cross this line going northward (decreasing y)
+   * to complete a lap (counterclockwise direction).
+   */
+  TR.lapLineXMin = TR.cx + TR.innerRx + 4;
+  TR.lapLineXMax = TR.cx + TR.outerRx - 4;
+  TR.lapLineY    = TR.cy;
+
+  // Re-place 4 cones at the diagonal corners of the inner ellipse,
+  // slightly offset inward so they sit on the road surface.
+  CONES.length = 0;
+  const coneAngles = [Math.PI / 4, 3 * Math.PI / 4, 5 * Math.PI / 4, 7 * Math.PI / 4];
+  for (let i = 0; i < coneAngles.length; i++) {
+    const a  = coneAngles[i];
+    const rx = TR.innerRx + 20;
+    const ry = TR.innerRy + 20;
+    CONES.push({
+      x: TR.cx + rx * Math.cos(a),
+      y: TR.cy + ry * Math.sin(a),
+      r: 8,    // collision radius (px)
+    });
+  }
+}
+
+/**
+ * Returns true if world-point (wx, wy) is on the driveable road surface —
+ * i.e., inside the outer ellipse but outside the inner ellipse.
+ */
+function isOnTrack(wx, wy) {
+  const dx = wx - TR.cx;
+  const dy = wy - TR.cy;
+  const outer = (dx / TR.outerRx) * (dx / TR.outerRx)
+              + (dy / TR.outerRy) * (dy / TR.outerRy);
+  const inner = (dx / TR.innerRx) * (dx / TR.innerRx)
+              + (dy / TR.innerRy) * (dy / TR.innerRy);
+  return outer <= 1.0 && inner >= 1.0;
+}
+
+
+/* ----------------------------------------------------------------
+   §4  INPUT SYSTEM — State Design Pattern
+
+   The Vehicle queries only the normalised outputs of InputHandler:
+     • steer      ∈ [−1.0, +1.0]   (−1 = full left, +1 = full right)
+     • accelerate ∈ [ 0.0,  1.0]   ( 0 = no throttle,  1 = full)
+       (may be slightly negative, −0.35, for keyboard braking)
+
+   The Vehicle has ZERO knowledge of the underlying hardware —
+   it cannot tell whether the player is tilting, touching, or typing.
+---------------------------------------------------------------- */
+
+// ── 4a  BaseInputState ─────────────────────────────────────────
+/**
+ * BaseInputState — the contract that every input mode must honour.
+ * Subclasses must update `this.steer` and `this.accelerate` in update().
+ */
+class BaseInputState {
+  constructor() {
+    this.steer      = 0;   // −1 … +1
+    this.accelerate = 0;   //  0 … +1  (or slightly negative for braking)
+  }
+  /** Invoked when this state becomes active.  Wire up listeners here. */
+  activate()   {}
+  /** Invoked when this state becomes inactive.  Remove listeners here. */
+  deactivate() {}
+  /** Called every physics tick (dt in seconds) to refresh outputs. */
+  update(/*dt*/) {}
+}
+
+
+// ── 4b  KeyboardState ──────────────────────────────────────────
+/**
+ * KeyboardState — Arrow Keys and WASD desktop fallback.
+ * Always active in parallel with the mobile state; overrides mobile
+ * output whenever any relevant key is held.
+ */
+class KeyboardState extends BaseInputState {
+  constructor() {
+    super();
+    // Pre-allocated key-state map; keys are set/cleared without
+    // creating new objects, so no GC pressure in the hot loop.
+    this._held = Object.create(null);
+    this._kd   = (e) => { this._held[e.code] = true;  };
+    this._ku   = (e) => { this._held[e.code] = false; };
+  }
+
+  activate() {
+    window.addEventListener('keydown', this._kd);
+    window.addEventListener('keyup',   this._ku);
+  }
+
+  deactivate() {
+    window.removeEventListener('keydown', this._kd);
+    window.removeEventListener('keyup',   this._ku);
+    // Clear state so stale keys don't affect the next activation
+    this._held = Object.create(null);
+  }
+
+  update() {
+    const h    = this._held;
+    const left  = h['ArrowLeft']  || h['KeyA'] || false;
+    const right = h['ArrowRight'] || h['KeyD'] || false;
+    const up    = h['ArrowUp']    || h['KeyW'] || false;
+    const down  = h['ArrowDown']  || h['KeyS'] || false;
+
+    this.steer      = (right ? 1 : 0) - (left ? 1 : 0);
+    this.accelerate = up ? 1.0 : (down ? -0.35 : 0);
+  }
+}
+
+
+// ── 4c  TouchState ─────────────────────────────────────────────
+/**
+ * TouchState — on-screen virtual buttons using the Touch Events API.
+ *
+ * Multi-touch design:
+ *  • Each button tracks its own Set of active touch identifiers.
+ *  • A player may hold Accelerate with one thumb while tapping
+ *    Left/Right with another finger — neither cancels the other.
+ *
+ * NOTE: We use touchstart / touchend / touchcancel exclusively.
+ *       mousedown / mouseup are intentionally NOT used (spec req).
+ *
+ * e.preventDefault() is called in every listener to suppress the
+ * browser's pull-to-refresh, swipe-to-navigate, and zoom gestures.
+ * This requires { passive: false } in addEventListener options.
+ */
+class TouchState extends BaseInputState {
+  constructor() {
+    super();
+    // Pre-allocated Sets — mutated in place, no allocation per event.
+    this._leftIds  = new Set();
+    this._rightIds = new Set();
+    this._accelIds = new Set();
+    this._listeners = null;   // Stored for cleanup
+  }
+
+  activate() {
+    document.getElementById('touch-controls').style.display = 'flex';
+    this._bindEvents();
+  }
+
+  deactivate() {
+    document.getElementById('touch-controls').style.display = 'none';
+    this._unbindEvents();
+    // Clear any touches that were in progress when we deactivated
+    this._leftIds.clear();
+    this._rightIds.clear();
+    this._accelIds.clear();
+  }
+
+  _bindEvents() {
+    const leftEl  = document.getElementById('left-btn');
+    const rightEl = document.getElementById('right-btn');
+    const accelEl = document.getElementById('accel-btn');
+
+    /**
+     * Factory: returns a touchstart handler that adds touch IDs to `ids`.
+     * We iterate changedTouches (only the fingers that *just* changed)
+     * rather than touches (all currently-down fingers) to avoid
+     * double-registering touches already tracked by another button.
+     */
+    const makeStart = (ids) => (e) => {
+      e.preventDefault();
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        ids.add(e.changedTouches[i].identifier);
+      }
+    };
+
+    /** Factory: touchend / touchcancel handler. */
+    const makeEnd = (ids) => (e) => {
+      e.preventDefault();
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        ids.delete(e.changedTouches[i].identifier);
+      }
+    };
+
+    this._listeners = [
+      [leftEl,  'touchstart',  makeStart(this._leftIds)],
+      [leftEl,  'touchend',    makeEnd(this._leftIds)],
+      [leftEl,  'touchcancel', makeEnd(this._leftIds)],
+      [rightEl, 'touchstart',  makeStart(this._rightIds)],
+      [rightEl, 'touchend',    makeEnd(this._rightIds)],
+      [rightEl, 'touchcancel', makeEnd(this._rightIds)],
+      [accelEl, 'touchstart',  makeStart(this._accelIds)],
+      [accelEl, 'touchend',    makeEnd(this._accelIds)],
+      [accelEl, 'touchcancel', makeEnd(this._accelIds)],
+    ];
+
+    for (let i = 0; i < this._listeners.length; i++) {
+      const [el, evt, fn] = this._listeners[i];
+      // { passive: false } is mandatory so preventDefault() has effect
+      el.addEventListener(evt, fn, { passive: false });
+    }
+  }
+
+  _unbindEvents() {
+    if (!this._listeners) return;
+    for (let i = 0; i < this._listeners.length; i++) {
+      const [el, evt, fn] = this._listeners[i];
+      el.removeEventListener(evt, fn);
+    }
+    this._listeners = null;
+  }
+
+  update() {
+    // Map Set sizes to normalised control values — no object allocation.
+    this.steer      = (this._rightIds.size > 0 ? 1 : 0)
+                    - (this._leftIds.size  > 0 ? 1 : 0);
+    this.accelerate = this._accelIds.size > 0 ? 1.0 : 0.0;
+  }
+}
+
+
+// ── 4d  TiltState ──────────────────────────────────────────────
+/**
+ * TiltState — Device Orientation API for gyroscope-based steering.
+ *
+ * iOS 13+ Security Protocol:
+ *  1. Check for DeviceOrientationEvent.requestPermission().
+ *  2. Call it inside a transient user gesture (our toggle-btn click).
+ *  3. Await the Promise; handle "granted" / "denied" / error.
+ *  ⚠  HTTPS REQUIRED: DeviceOrientationEvent is blocked on insecure
+ *     origins (http://) in Chrome 65+ and Safari.  Always deploy over
+ *     HTTPS when tilt controls are needed.
+ *
+ * Signal Processing — IIR Low-Pass Filter:
+ *  Raw sensor data contains high-frequency noise.  We smooth it with:
+ *    Y_n = α · X_n  +  (1 − α) · Y_(n-1)
+ *  where X_n = raw gamma reading, Y_n = filtered output, α = TILT_ALPHA.
+ *  A small α (0.1) heavily smooths the signal at the cost of slight lag.
+ *
+ * Angle mapping:
+ *  event.gamma = left/right tilt in portrait, range −90° … +90°.
+ *  We clamp to ±TILT_CLAMP_DEG (40°) and normalise to ±1.0.
+ */
+class TiltState extends BaseInputState {
+  constructor() {
+    super();
+    this._filteredGamma = 0;   // IIR filter state (retains last output)
+    this._handler       = null;
+    this._permitted     = false;
+  }
+
+  /**
+   * Called from the toggle-btn click handler — that click IS a
+   * transient user gesture, satisfying iOS 13+ requirements.
+   */
+  activate() {
+    // Hide on-screen buttons while driving by tilt
+    document.getElementById('touch-controls').style.display = 'none';
+
+    if (typeof DeviceOrientationEvent === 'undefined') {
+      showToast('Tilt not supported on this browser/device.');
+      // Schedule switch so we don't modify inputHandler mid-call
+      setTimeout(() => inputHandler.switchToTouch(), 50);
+      return;
+    }
+
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      /*
+       * iOS 13+ path:
+       * requestPermission() MUST be called synchronously inside a user
+       * gesture.  The toggle-btn click satisfies this requirement.
+       * NOTE: This will fail on HTTP — HTTPS is mandatory.
+       */
+      DeviceOrientationEvent.requestPermission()
+        .then((result) => {
+          if (result === 'granted') {
+            this._startListening();
+          } else {
+            showToast('Tilt permission denied. Switching to Touch.');
+            setTimeout(() => inputHandler.switchToTouch(), 50);
+          }
+        })
+        .catch(() => {
+          showToast('Could not request tilt permission.');
+          setTimeout(() => inputHandler.switchToTouch(), 50);
+        });
+    } else {
+      // Non-iOS browser or older iOS — start immediately
+      this._startListening();
+    }
+  }
+
+  _startListening() {
+    this._permitted = true;
+    this._handler   = (e) => this._onOrientation(e);
+    window.addEventListener('deviceorientation', this._handler, false);
+  }
+
+  deactivate() {
+    this._permitted = false;
+    if (this._handler) {
+      window.removeEventListener('deviceorientation', this._handler);
+      this._handler = null;
+    }
+  }
+
+  /** Raw orientation event — apply IIR filter to gamma angle. */
+  _onOrientation(event) {
+    const raw = event.gamma || 0;
+    /*
+     * IIR Low-Pass Filter:
+     *   Y_n = α · X_n  +  (1 − α) · Y_(n-1)
+     * Accumulates into the same variable — zero heap allocation.
+     */
+    this._filteredGamma = TILT_ALPHA * raw
+                        + (1 - TILT_ALPHA) * this._filteredGamma;
+  }
+
+  update() {
+    if (!this._permitted) {
+      this.steer = this.accelerate = 0;
+      return;
+    }
+    // Clamp filtered angle to physical range ±TILT_CLAMP_DEG
+    const clamped = Math.max(-TILT_CLAMP_DEG,
+                    Math.min( TILT_CLAMP_DEG, this._filteredGamma));
+    // Normalise [−TILT_CLAMP_DEG, +TILT_CLAMP_DEG] → [−1, +1]
+    this.steer      = clamped / TILT_CLAMP_DEG;
+    // Auto-throttle in tilt mode — the player focuses purely on steering
+    this.accelerate = 1.0;
+  }
+}
+
+
+// ── 4e  InputHandler ───────────────────────────────────────────
+/**
+ * InputHandler — the single object queried by the Vehicle each tick.
+ *
+ * It owns one "mobile" state (Touch or Tilt) and always runs the
+ * Keyboard state in parallel.  If any keyboard key is held it takes
+ * priority over the mobile state, giving desktop users seamless control
+ * without needing to toggle modes.
+ */
+class InputHandler {
+  constructor() {
+    this._touch    = new TouchState();
+    this._tilt     = new TiltState();
+    this._keyboard = new KeyboardState();
+
+    // Start in Touch mode (safe default — no permission required)
+    this._mobile  = this._touch;
+    this.modeName = 'TOUCH';
+
+    this._mobile.activate();
+    this._keyboard.activate();
+
+    // Normalised outputs read by the Vehicle
+    this.steer      = 0;
+    this.accelerate = 0;
+  }
+
+  /** Toggle between Touch and Tilt input modes. */
+  toggle() {
+    this._mobile.deactivate();
+    if (this._mobile === this._touch) {
+      this._mobile  = this._tilt;
+      this.modeName = 'TILT';
+      document.getElementById('toggle-btn').textContent = '🎮 TOUCH MODE';
+    } else {
+      this._mobile  = this._touch;
+      this.modeName = 'TOUCH';
+      document.getElementById('toggle-btn').textContent = '📱 TILT MODE';
+    }
+    this._mobile.activate();
+    refreshHUD();
+  }
+
+  /** Called by TiltState when permission is denied — silently revert. */
+  switchToTouch() {
+    if (this._mobile === this._tilt) {
+      this._mobile.deactivate();
+      this._mobile  = this._touch;
+      this.modeName = 'TOUCH';
+      document.getElementById('toggle-btn').textContent = '📱 TILT MODE';
+      this._mobile.activate();
+      refreshHUD();
+    }
+  }
+
+  /**
+   * Update all states and merge outputs.
+   * Keyboard wins when any key is pressed — provides seamless desktop fallback.
+   */
+  update(dt) {
+    this._mobile.update(dt);
+    this._keyboard.update(dt);
+
+    if (this._keyboard.steer !== 0 || this._keyboard.accelerate !== 0) {
+      this.steer      = this._keyboard.steer;
+      this.accelerate = this._keyboard.accelerate;
+    } else {
+      this.steer      = this._mobile.steer;
+      this.accelerate = this._mobile.accelerate;
+    }
+  }
+}
+
+
+/* ----------------------------------------------------------------
+   §5  VEHICLE PHYSICS
+
+   Newtonian kinematics in 2D (canvas coordinate system: y ↓).
+
+   Forward direction at heading angle θ:
+     fwd  = ( cos θ ,  sin θ )
+
+   Right-facing normal (passenger side; rotated 90° CW in screen space):
+     right = (−sin θ , cos θ )
+     Verification:
+       θ=0 (east)  → right = (0, +1) = south   ✓ (driver's right when facing east)
+       θ=π/2 (south) → right = (−1, 0) = west  ✓ (driver's right when facing south)
+
+   Lateral velocity cancellation:
+     lateralVel = dot(velocity, right)
+                = vx·(−sin θ) + vy·(cos θ)
+     Per tick, we subtract up to MAX_LATERAL_IMPULSE of this component.
+     Clamping it creates the drift: excess lateral velocity persists.
+
+   Transmission curve:
+     thrust = ENGINE_POWER × accelerate × (1 − speed/MAX_SPEED) / MASS
+     → Power tapers to zero as speed approaches MAX_SPEED.
+---------------------------------------------------------------- */
+
+class Vehicle {
+  constructor(x, y, angle, bodyColor) {
+    // ── Current physics state ──
+    this.x     = x;
+    this.y     = y;
+    this.angle = angle;   // radians; 0 = pointing east (+x), increases CW
+    this.vx    = 0;
+    this.vy    = 0;
+
+    // ── Previous state — snapshot taken at start of each physics tick ──
+    // Used by draw() to interpolate rendering between ticks.
+    this.prevX     = x;
+    this.prevY     = y;
+    this.prevAngle = angle;
+
+    this.bodyColor = bodyColor || C.CAR_BODY;
+
+    // ── Game-state bookkeeping ──
+    this.onTrack   = true;
+    this.lapCount  = 0;
+    this._prevY    = y;    // For lap-line crossing detection
+
+    /*
+     * Skid-mark ring buffer — pre-allocated Float32Array so the
+     * hot update() loop never allocates new memory (no GC spikes).
+     * Layout: [ x0, y0, x1, y1,  x0, y0, x1, y1, … ]  (4 floats per segment)
+     * Capacity: 128 segments.
+     */
+    this._skidBuf  = new Float32Array(128 * 4);
+    this._skidHead = 0;    // Write pointer (mod 128)
+    this._skidLen  = 0;    // How many segments are valid (capped at 128)
+  }
+
+  /**
+   * Physics update — called every fixed timestep (FIXED_DT seconds).
+   *
+   * Step order:
+   *   1. Save previous state for render interpolation
+   *   2. Steering
+   *   3. Engine thrust with transmission curve
+   *   4. Environmental drag
+   *   5. Lateral velocity cancellation (grip / drift mechanic)
+   *   6. Position integration
+   *   7. Cone collision
+   *   8. Track boundary & grass drag
+   *   9. Lap counter
+   *  10. Skid-mark recording
+   */
+  update(dt, input) {
+    // ── 1. Snapshot previous state ────────────────────────────
+    this.prevX     = this.x;
+    this.prevY     = this.y;
+    this.prevAngle = this.angle;
+
+    const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+
+    // ── 2. Steering ───────────────────────────────────────────
+    // Scale steering effect by speed so the car doesn't spin on the spot.
+    const speedFactor = Math.min(1.0, speed / 55.0);
+    this.angle += input.steer * VPHYS.STEER_SPEED * speedFactor * dt;
+
+    // ── 3. Engine thrust (transmission curve) ────────────────
+    // forward-facing unit vector
+    const fwdX = Math.cos(this.angle);
+    const fwdY = Math.sin(this.angle);
+
+    // Thrust diminishes linearly to 0 as speed reaches MAX_SPEED
+    const speedRatio = Math.min(1.0, speed / VPHYS.MAX_SPEED);
+    const thrust     = VPHYS.ENGINE_POWER
+                     * input.accelerate
+                     * (1.0 - speedRatio)
+                     / VPHYS.MASS;
+
+    this.vx += fwdX * thrust * dt;
+    this.vy += fwdY * thrust * dt;
+
+    // ── 4. Environmental drag ─────────────────────────────────
+    // Extra friction when the car leaves the tarmac
+    const drag = this.onTrack ? VPHYS.DRAG : VPHYS.OFFTRACK_DRAG;
+    this.vx *= drag;
+    this.vy *= drag;
+
+    // ── 5. Lateral velocity cancellation ─────────────────────
+    /*
+     * Right-facing unit normal: right = (−sin θ, cos θ)
+     *   (see §5 header comment for derivation)
+     */
+    const rightX = -Math.sin(this.angle);
+    const rightY =  Math.cos(this.angle);
+
+    // Lateral velocity = component of velocity along the right vector
+    const lateralVel = this.vx * rightX + this.vy * rightY;
+
+    /*
+     * DRIFT MECHANIC:
+     * Cancel at most MAX_LATERAL_IMPULSE per tick.
+     * If |lateralVel| ≤ threshold → full cancellation → grippy handling.
+     * If |lateralVel| >  threshold → partial cancel  → car drifts.
+     */
+    const abslat    = lateralVel < 0 ? -lateralVel : lateralVel;
+    const sign      = lateralVel < 0 ? -1 : 1;
+    const cancelMag = sign * (abslat < VPHYS.MAX_LATERAL_IMPULSE
+                              ? abslat
+                              : VPHYS.MAX_LATERAL_IMPULSE);
+
+    this.vx -= cancelMag * rightX;
+    this.vy -= cancelMag * rightY;
+
+    // ── 6. Integrate position ─────────────────────────────────
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+
+    // ── 7. Cone collision (simple circle vs. point) ───────────
+    for (let i = 0; i < CONES.length; i++) {
+      const c  = CONES[i];
+      const ex = this.x - c.x;
+      const ey = this.y - c.y;
+      const d2 = ex * ex + ey * ey;
+      const rr = (c.r + 12) * (c.r + 12);   // 12 px ≈ car half-width
+      if (d2 < rr && d2 > 0.001) {
+        // Push car away from cone and shed most of its speed
+        const inv = 1.0 / Math.sqrt(d2);
+        this.x  += ex * inv * (c.r + 12 - Math.sqrt(d2));
+        this.y  += ey * inv * (c.r + 12 - Math.sqrt(d2));
+        this.vx *= 0.6;
+        this.vy *= 0.6;
+      }
+    }
+
+    // ── 8. Track boundary ─────────────────────────────────────
+    this.onTrack = isOnTrack(this.x, this.y);
+    if (!this.onTrack) {
+      // Soft bounce: bleed velocity toward the track-normal direction
+      this.vx *= 0.88;
+      this.vy *= 0.88;
+    }
+
+    // ── 9. Lap counter ────────────────────────────────────────
+    this._checkLap();
+
+    // ── 10. Record skid marks when drifting ───────────────────
+    if (abslat > VPHYS.MAX_LATERAL_IMPULSE * 0.65) {
+      const slot = (this._skidHead % 128) * 4;
+      this._skidBuf[slot]     = this.prevX;
+      this._skidBuf[slot + 1] = this.prevY;
+      this._skidBuf[slot + 2] = this.x;
+      this._skidBuf[slot + 3] = this.y;
+      this._skidHead++;
+      if (this._skidLen < 128) this._skidLen++;
+    }
+  }
+
+  /** Detect crossing the start/finish line (northward, counterclockwise lap). */
+  _checkLap() {
+    /*
+     * The start/finish line is a horizontal segment at y = TR.lapLineY,
+     * spanning x ∈ [TR.lapLineXMin, TR.lapLineXMax] (right side of oval).
+     * A valid lap crossing: car moves from y > lapLineY to y ≤ lapLineY
+     * (northward, i.e., decreasing y) while within the x-range.
+     */
+    if (this.x >= TR.lapLineXMin && this.x <= TR.lapLineXMax) {
+      if (this._prevY > TR.lapLineY && this.y <= TR.lapLineY) {
+        this.lapCount++;
+      }
+    }
+    this._prevY = this.y;
+  }
+
+  /**
+   * Draw the vehicle with render interpolation.
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {number} alpha  Fraction [0, 1] between previous and current state.
+   *                        0 = draw at prevState, 1 = draw at currentState.
+   */
+  draw(ctx, alpha) {
+    // Interpolate position
+    const rx = this.prevX + (this.x - this.prevX) * alpha;
+    const ry = this.prevY + (this.y - this.prevY) * alpha;
+
+    // Interpolate heading (shortest-path angle wrap)
+    let dA = this.angle - this.prevAngle;
+    if (dA >  Math.PI) dA -= Math.PI * 2;
+    if (dA < -Math.PI) dA += Math.PI * 2;
+    const ra = this.prevAngle + dA * alpha;
+
+    const hw = VPHYS.W;   // half-width
+    const hh = VPHYS.H;   // half-height
+
+    ctx.save();
+    ctx.translate(rx, ry);
+    ctx.rotate(ra);
+
+    // Drop shadow
+    ctx.shadowColor   = C.SHADOW;
+    ctx.shadowBlur    = 8;
+    ctx.shadowOffsetX = 3;
+    ctx.shadowOffsetY = 4;
+
+    // Car body rectangle (centre at origin; +Y = back of car)
+    ctx.fillStyle = this.bodyColor;
+    ctx.fillRect(-hw, -hh, hw * 2, hh * 2);
+
+    // Disable shadow for details
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur  = 0;
+
+    // Windshield strip at the front
+    ctx.fillStyle = C.CAR_WINDOW;
+    ctx.fillRect(-hw + 3, -hh + 3, hw * 2 - 6, hh * 0.35);
+
+    // Front-facing yellow bumper stripe — visually marks the "nose"
+    ctx.fillStyle = C.CAR_FRONT;
+    ctx.fillRect(-hw, -hh - 4, hw * 2, 5);
+
+    ctx.restore();
+  }
+
+  /** Draw all recorded skid marks. Called before the vehicle (roads above). */
+  drawSkids(ctx) {
+    if (this._skidLen === 0) return;
+    ctx.save();
+    ctx.strokeStyle = C.SKID;
+    ctx.lineWidth   = 3;
+    ctx.lineCap     = 'round';
+
+    const start = this._skidHead - this._skidLen;
+    for (let i = 0; i < this._skidLen; i++) {
+      const slot = ((start + i) % 128) * 4;
+      ctx.beginPath();
+      ctx.moveTo(this._skidBuf[slot],     this._skidBuf[slot + 1]);
+      ctx.lineTo(this._skidBuf[slot + 2], this._skidBuf[slot + 3]);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /** Reset car to starting position (called by Start / Reset). */
+  reset() {
+    // Start on the right side of the oval, slightly north of the lap line,
+    // facing north (−π/2) so the first move goes counterclockwise.
+    this.x     = TR.cx + (TR.innerRx + TR.outerRx) * 0.5;
+    this.y     = TR.cy - 30;
+    this.angle = -Math.PI / 2;   // Facing north (up, decreasing y)
+    this.vx    = 0;
+    this.vy    = 0;
+    this.prevX     = this.x;
+    this.prevY     = this.y;
+    this.prevAngle = this.angle;
+    this._prevY    = this.y;
+    this.onTrack   = true;
+    this.lapCount  = 0;
+    this._skidHead = 0;
+    this._skidLen  = 0;
+  }
+}
+
+
+/* ----------------------------------------------------------------
+   §6  RENDERING HELPERS
+---------------------------------------------------------------- */
+
+// Cached kerb-stripe pattern — built once in buildKerbPattern()
+let _kerbPatternOuter = null;
+let _kerbPatternInner = null;
+
+/**
+ * Build a small repeating red/white stripe canvas for kerbs.
+ * Cached so we don't recreate it every frame.
+ */
+function buildKerbPatterns() {
+  const size   = 24;
+  const stripe = document.createElement('canvas');
+  stripe.width = stripe.height = size;
+  const sc = stripe.getContext('2d');
+
+  // Diagonal red/white stripes
+  sc.fillStyle = C.KERB_WHITE;
+  sc.fillRect(0, 0, size, size);
+  sc.fillStyle = C.KERB_RED;
+  sc.beginPath();
+  sc.moveTo(0, 0);    sc.lineTo(size, 0);
+  sc.lineTo(size, size * 0.5);
+  sc.lineTo(0, size * 0.5);
+  sc.closePath(); sc.fill();
+  sc.beginPath();
+  sc.moveTo(0, size);    sc.lineTo(size, size);
+  sc.lineTo(size, size);
+  sc.lineTo(0, size);
+  sc.closePath(); sc.fill();
+
+  const pat = ctx.createPattern(stripe, 'repeat');
+  _kerbPatternOuter = pat;
+  _kerbPatternInner = pat;
+}
+
+/** Draw the full track: grass → road → kerbs → lines → start/finish. */
+function drawTrack() {
+  // ── Grass background ─────────────────────────────────────────
+  ctx.fillStyle = C.GRASS;
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle alternating grass stripes (visual texture without images)
+  ctx.fillStyle = 'rgba(0,0,0,.06)';
+  const stripeW = 40;
+  for (let x = 0; x < W; x += stripeW * 2) {
+    ctx.fillRect(x, 0, stripeW, H);
+  }
+
+  // ── Road surface ──────────────────────────────────────────────
+  // Fill outer ellipse with road colour
+  ctx.beginPath();
+  ctx.ellipse(TR.cx, TR.cy, TR.outerRx, TR.outerRy, 0, 0, Math.PI * 2);
+  ctx.fillStyle = C.ROAD;
+  ctx.fill();
+
+  // Punch inner ellipse back to grass (creates the oval hole / infield)
+  ctx.beginPath();
+  ctx.ellipse(TR.cx, TR.cy, TR.innerRx, TR.innerRy, 0, 0, Math.PI * 2);
+  ctx.fillStyle = C.GRASS;
+  ctx.fill();
+
+  // Infield decorative inner ring
+  ctx.beginPath();
+  ctx.ellipse(TR.cx, TR.cy, TR.innerRx - 6, TR.innerRy - 6, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(0,0,0,.2)';
+  ctx.lineWidth   = 2;
+  ctx.stroke();
+
+  // ── Outer kerb (red/white stripes) ───────────────────────────
+  ctx.beginPath();
+  ctx.ellipse(TR.cx, TR.cy, TR.outerRx + 1, TR.outerRy + 1, 0, 0, Math.PI * 2);
+  ctx.ellipse(TR.cx, TR.cy, TR.outerRx - 10, TR.outerRy - 10, 0, 0, Math.PI * 2, true);
+  ctx.fillStyle = _kerbPatternOuter || C.KERB_RED;
+  ctx.fill('evenodd');
+
+  // ── Inner kerb (red/white stripes) ───────────────────────────
+  ctx.beginPath();
+  ctx.ellipse(TR.cx, TR.cy, TR.innerRx + 10, TR.innerRy + 10, 0, 0, Math.PI * 2);
+  ctx.ellipse(TR.cx, TR.cy, TR.innerRx - 1, TR.innerRy - 1, 0, 0, Math.PI * 2, true);
+  ctx.fillStyle = _kerbPatternInner || C.KERB_RED;
+  ctx.fill('evenodd');
+
+  // ── White boundary lines ──────────────────────────────────────
+  ctx.strokeStyle = C.LINE;
+  ctx.lineWidth   = 2.5;
+
+  ctx.beginPath();
+  ctx.ellipse(TR.cx, TR.cy, TR.outerRx - 10, TR.outerRy - 10, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.ellipse(TR.cx, TR.cy, TR.innerRx + 10, TR.innerRy + 10, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // ── Dashed centre line ────────────────────────────────────────
+  ctx.strokeStyle = C.CENTRE_DASH;
+  ctx.lineWidth   = 1.5;
+  ctx.setLineDash([16, 12]);
+  ctx.beginPath();
+  const midRx = (TR.outerRx + TR.innerRx) * 0.5;
+  const midRy = (TR.outerRy + TR.innerRy) * 0.5;
+  ctx.ellipse(TR.cx, TR.cy, midRx, midRy, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);   // Always reset line-dash after use
+
+  // ── Start / finish line ───────────────────────────────────────
+  drawStartLine();
+}
+
+/** Draw a checkered start/finish line on the right side of the oval. */
+function drawStartLine() {
+  const x0   = TR.lapLineXMin;
+  const x1   = TR.lapLineXMax;
+  const y    = TR.lapLineY;
+  const wide = x1 - x0;
+  const sqSz = 10;                     // Size of each checker square
+  const cols = Math.ceil(wide / sqSz);
+  const rows = 3;
+
+  for (let c = 0; c < cols; c++) {
+    for (let r = 0; r < rows; r++) {
+      ctx.fillStyle = (c + r) % 2 === 0 ? '#fff' : '#222';
+      ctx.fillRect(
+        x0 + c * sqSz,
+        y - rows * sqSz * 0.5 + r * sqSz,
+        sqSz, sqSz
+      );
+    }
+  }
+}
+
+/** Draw static cone obstacles. */
+function drawCones() {
+  for (let i = 0; i < CONES.length; i++) {
+    const c = CONES[i];
+
+    // Cone shadow
+    ctx.save();
+    ctx.shadowColor   = 'rgba(0,0,0,.4)';
+    ctx.shadowBlur    = 5;
+    ctx.shadowOffsetX = 2;
+    ctx.shadowOffsetY = 2;
+
+    // Orange cone body (triangle)
+    ctx.fillStyle = C.CONE_ORANGE;
+    ctx.beginPath();
+    ctx.moveTo(c.x,           c.y - c.r * 2.2);
+    ctx.lineTo(c.x - c.r,     c.y + c.r);
+    ctx.lineTo(c.x + c.r,     c.y + c.r);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.shadowColor = 'transparent';
+
+    // White stripe on cone
+    ctx.fillStyle = C.CONE_WHITE;
+    ctx.fillRect(c.x - c.r * 0.55, c.y - c.r * 0.3, c.r * 1.1, c.r * 0.45);
+
+    ctx.restore();
+  }
+}
+
+
+/* ----------------------------------------------------------------
+   §6b  HUD helpers
+   DOM-based HUD to get crisp text on all DPR values.
+---------------------------------------------------------------- */
+
+const _hudSpeed = document.getElementById('hud-speed');
+const _hudMode  = document.getElementById('hud-mode');
+const _hudLaps  = document.getElementById('hud-laps');
+
+// Cache last values so DOM is only touched when something changes
+let _lastSpeed = -1;
+let _lastMode  = '';
+let _lastLaps  = -1;
+
+function refreshHUD() {
+  _lastSpeed = _lastLaps = -1;   // Force redraw next frame
+  _lastMode  = '';
+}
+
+function updateHUD(speedPx, modeName, laps) {
+  // Convert px/s → "game km/h".
+  // Factor 0.108 ≈ 30/277: scales 300 px/s (max speed) to ≈32 km/h on-screen.
+  // Multiply by 10 then divide to round to one decimal place (e.g. 24.6 km/h).
+  const speedKph = Math.round(speedPx * 0.108 * 10) / 10;
+  if (speedKph  !== _lastSpeed) { _hudSpeed.textContent = speedKph  + ' km/h'; _lastSpeed = speedKph;  }
+  if (modeName  !== _lastMode)  { _hudMode.textContent  = '● ' + modeName;     _lastMode  = modeName;  }
+  if (laps      !== _lastLaps)  { _hudLaps.textContent  = 'LAP: ' + laps;      _lastLaps  = laps;      }
+}
+
+// Toast notification with auto-hide
+let _toastTimer = 0;
+const _toastEl  = document.getElementById('toast');
+
+function showToast(msg) {
+  _toastEl.textContent = msg;
+  _toastEl.classList.add('visible');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => _toastEl.classList.remove('visible'), 3000);
+}
+
+
+/* ----------------------------------------------------------------
+   §7  GAME LOOP — Fixed Time-Step with Render Interpolation
+
+   Architecture (Robert Nystrom "Game Programming Patterns" §9):
+
+     accumulator += deltaTime
+     while (accumulator >= FIXED_DT) {
+       physicsUpdate(FIXED_DT)
+       accumulator -= FIXED_DT
+     }
+     alpha = accumulator / FIXED_DT   ← fraction of a tick "ahead"
+     render(alpha)                     ← lerp between prev & current
+
+   Benefits:
+     • Physics is deterministic (same result on 30 fps and 120 fps).
+     • Rendering is smooth even when physics and display rates diverge.
+     • No new objects are allocated inside the loop (no GC spikes).
+---------------------------------------------------------------- */
+
+let accumulator    = 0;
+let lastTimestamp  = 0;
+let gameRunning    = false;
+
+/*
+ * Reusable input snapshot — passed to vehicle.update() every tick.
+ * Allocated once here; fields are mutated in place inside the loop
+ * so no object is ever created during gameplay.
+ */
+const _inputSnapshot = { steer: 0, accelerate: 0 };
+
+function gameLoop(timestamp) {
+  if (!gameRunning) return;
+  requestAnimationFrame(gameLoop);
+
+  // ── Delta-time calculation ─────────────────────────────────
+  if (lastTimestamp === 0) lastTimestamp = timestamp;
+  const rawDt       = (timestamp - lastTimestamp) / 1000;
+  lastTimestamp     = timestamp;
+  // Cap to prevent spiral-of-death when tab is hidden / compositor stalls
+  const frameDt     = rawDt < MAX_FRAME_TIME ? rawDt : MAX_FRAME_TIME;
+  accumulator      += frameDt;
+
+  // ── Fixed-step physics ─────────────────────────────────────
+  while (accumulator >= FIXED_DT) {
+    // Update input states (no allocation — mutates steer/accelerate fields)
+    inputHandler.update(FIXED_DT);
+
+    // Copy to reusable snapshot — avoids creating a new object each tick
+    _inputSnapshot.steer      = inputHandler.steer;
+    _inputSnapshot.accelerate = inputHandler.accelerate;
+
+    // Physics tick
+    player.update(FIXED_DT, _inputSnapshot);
+
+    accumulator -= FIXED_DT;
+  }
+
+  // ── Render interpolation ───────────────────────────────────
+  // alpha = how far we are between the last completed tick and the next
+  const alpha = accumulator / FIXED_DT;
+
+  render(alpha);
+}
+
+function render(alpha) {
+  // ── Track (static each frame) ──────────────────────────────
+  drawTrack();
+
+  // ── Skid marks (below car) ─────────────────────────────────
+  player.drawSkids(ctx);
+
+  // ── Cones ──────────────────────────────────────────────────
+  drawCones();
+
+  // ── Start/finish line drawn as part of drawTrack(); already done ──
+
+  // ── Player vehicle (with interpolation) ───────────────────
+  player.draw(ctx, alpha);
+
+  // ── HUD ────────────────────────────────────────────────────
+  const spd = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+  updateHUD(spd, inputHandler.modeName, player.lapCount);
+}
+
+
+/* ----------------------------------------------------------------
+   §8  INITIALISATION & EVENT WIRING
+---------------------------------------------------------------- */
+
+// Global instances (declared with let so tests / console can inspect)
+let inputHandler;
+let player;
+
+function init() {
+  // Size canvas first so track geometry is valid when Vehicle.reset() runs
+  resize();
+
+  inputHandler = new InputHandler();
+
+  // Build cached canvas patterns for kerb stripes
+  buildKerbPatterns();
+
+  // Create player car on the right side of the oval, facing north
+  player = new Vehicle(
+    TR.cx + (TR.innerRx + TR.outerRx) * 0.5,
+    TR.cy - 30,
+    -Math.PI / 2,
+    C.CAR_BODY
+  );
+}
+
+function startGame() {
+  document.getElementById('start-screen').style.display = 'none';
+
+  // Re-initialise track geometry in case a resize happened at the start screen
+  resize();
+  player.reset();
+
+  gameRunning   = true;
+  lastTimestamp = 0;
+  accumulator   = 0;
+
+  requestAnimationFrame(gameLoop);
+}
+
+// ── DOM event listeners ────────────────────────────────────────
+
+document.getElementById('start-btn').addEventListener('click', startGame);
+
+/*
+ * Toggle button:
+ *  - Switches between Touch and Tilt input modes.
+ *  - On iOS 13+, this click IS the transient user gesture required by
+ *    DeviceOrientationEvent.requestPermission().  Do NOT call toggle()
+ *    from a setTimeout or async context — it must be called synchronously
+ *    inside a user-gesture handler, or iOS will reject the permission.
+ */
+document.getElementById('toggle-btn').addEventListener('click', () => {
+  if (inputHandler) inputHandler.toggle();
+});
+
+// Resize: recompute canvas size + track geometry on orientation change
+window.addEventListener('resize', () => {
+  resize();
+  if (player) player.reset();
+});
+
+// Prevent context menu on long-press (would cover controls on mobile)
+window.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// Initialise on load
+init();
+
+</script>
+</body>
+</html>
